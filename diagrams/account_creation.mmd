@@ -1,0 +1,87 @@
+flowchart TD
+    %% PawPal+ architecture, part 1 of 2: login & account creation (auth.py + database.py)
+    %% Data flow: landing -> log in OR sign up -> save account -> start session -> agent workflow
+    %% Part 2 (what happens after login) is in diagrams/agent_workflow.mmd
+    %% LEGEND: solid arrow (-->) = next step / function call
+    %%         dotted arrow (-.->) = data, pointing the way the data moves (reads point FROM the store)
+    %%         dotted line, no arrow (-.-) = covered by tests
+
+    Legend["Legend<br/>solid arrow = next step / call<br/>dotted arrow = data, points the way it moves<br/>dotted line = covered by tests"]
+
+    User(["👤 Pet owner"])
+
+    subgraph Auth["Login & account creation (auth.py)"]
+        Landing{"Has an<br/>account?"}
+        Login["Log in<br/>email + password"]
+        Verify{"Credentials valid?<br/>login()"}
+
+        subgraph Signup["Create account form (app.py → auth.py)"]
+            S1["Owner info<br/>first name · last name · age<br/>email + password"]
+            S2{"Part of an existing<br/>household?"}
+            S3a["Join household<br/>enter household code"]
+            CodeOK{"Household code found?<br/>find_household()"}
+            HasPets{"Household already<br/>has pets?"}
+            S3b["Create new household<br/>enter household name<br/>generate_household_code()<br/>(regenerate on collision)"]
+            S4["Add pets (repeat for each)<br/>name · breed · age<br/>special needs + care tasks"]
+            S5{"All fields valid?<br/>validate_signup()<br/>email not registered · age is a number<br/>at least 1 pet in household"}
+            Save["Save account (one transaction)<br/>save_account()<br/>create Owner + Pet objects"]
+        end
+
+        Session["Start session<br/>start_session()<br/>st.session_state: owner + household"]
+    end
+
+    subgraph Store["Data store (SQLite · database.py)"]
+        Accounts[("Accounts<br/>email · hashed password (PBKDF2) · owner id<br/>failed login count · locked until")]
+        Households[("Households<br/>code · members · pets · tasks · version")]
+    end
+
+    subgraph Core["PawPal+ core logic (pawpal_system.py)"]
+        HH["Household<br/>owners · pets · tasks"]
+    end
+
+    Next(["➡️ Agent workflow<br/>(diagrams/agent_workflow.mmd)"])
+
+    Tests["pytest<br/>tests/test_database_auth.py"]
+
+    %% Login flow
+    User --> Landing
+    Landing -- "yes" --> Login
+    Login --> Verify
+    Accounts -. "password hash" .-> Verify
+    Verify -. "update failure count" .-> Accounts
+    Verify -- "no, retry (lock 15 min after 5 failures)" --> Login
+    Login -- "no account? sign up" --> S1
+    Verify -- "yes" --> Session
+
+    %% Sign-up flow
+    Landing -- "no" --> S1
+    S1 -- "first pass" --> S2
+    S1 -- "after fixing errors (household + pets kept)" --> S5
+    S2 -- "yes" --> S3a
+    S2 -- "no" --> S3b
+    S3a --> CodeOK
+    Households -. "household matching code + its pets" .-> CodeOK
+    CodeOK -- "no, show error" --> S3a
+    CodeOK -- "yes" --> HasPets
+    HasPets -- "no" --> S4
+    HasPets -- "yes, add more (optional)" --> S4
+    HasPets -- "yes, skip" --> S5
+    Households -. "existing codes" .-> S3b
+    S3b --> S4
+    S4 --> S5
+    Accounts -. "registered emails" .-> S5
+    S5 -- "owner info errors / email taken" --> S1
+    S5 -- "pet errors" --> S4
+    S5 -- "yes" --> Save
+    Save -. "new account" .-> Accounts
+    Save -. "new / updated household" .-> Households
+    Save --> Session
+
+    %% Session start
+    Households -. "load household" .-> Session
+    Session -. "build objects" .-> HH
+    Session --> Next
+
+    %% Tests
+    Tests -.- Auth
+    Tests -.- Store

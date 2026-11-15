@@ -151,6 +151,8 @@ class Owner:
     available_minutes: Optional[int] = None
     # Tasks this person is responsible for. Only changed by Household.
     tasks: list[Task] = field(default_factory=list, repr=False)
+    # Links this person to their saved account (see auth.py); None if not saved.
+    owner_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Check that home hours, if both are set, start before they end."""
