@@ -1,5 +1,5 @@
 flowchart TD
-    %% PawPal+ architecture, part 1 of 2: login & account creation (auth.py + database.py)
+    %% PawPal 2.0 architecture, part 1 of 2: login & account creation (auth.py + database.py)
     %% Data flow: landing -> log in OR sign up -> save account -> start session -> agent workflow
     %% Part 2 (what happens after login) is in diagrams/agent_workflow.mmd
     %% LEGEND: solid arrow (-->) = next step / function call
@@ -35,7 +35,7 @@ flowchart TD
         Households[("Households<br/>code · members · pets · tasks · version")]
     end
 
-    subgraph Core["PawPal+ core logic (pawpal_system.py)"]
+    subgraph Core["PawPal 2.0 core logic (pawpal_system.py)"]
         HH["Household<br/>owners · pets · tasks"]
     end
 

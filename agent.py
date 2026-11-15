@@ -1,4 +1,4 @@
-"""PawPal+ AI agent: plan -> act -> check -> fix, on a draft copy of the household.
+"""PawPal 2.0 AI agent: plan -> act -> check -> fix, on a draft copy of the household.
 
 Follows the "AI Agent" box in diagrams/agent_workflow.mmd:
     start_run()   round = 0, copy Household -> Draft, note version
@@ -284,6 +284,9 @@ def describe_household(household: Household, day: date) -> str:
                  if owner.home_start and owner.home_end else "home all day")
         minutes = owner.available_minutes if owner.available_minutes is not None else "no limit"
         lines.append(f"  - {owner.name}: {hours}, care minutes: {minutes}")
+        for away in owner.away:
+            if away.end_date >= day:  # past absences don't matter
+                lines.append(f"      away: {away.describe()}")
     lines.append("Pets:")
     for pet in household.pets:
         needs = ", ".join(pet.special_needs) or "none"
@@ -305,7 +308,7 @@ def describe_household(household: Household, day: date) -> str:
 
 # --- Prompts -------------------------------------------------------------------
 
-PLANNER_SYSTEM = """You are the planning step of PawPal+, a pet care scheduling assistant \
+PLANNER_SYSTEM = """You are the planning step of PawPal 2.0, a pet care scheduling assistant \
 for a household that shares pets. Read the owner's request and the household state.
 
 Decide whether the request needs changes to the household (adding, editing or reassigning \
@@ -317,16 +320,17 @@ Return JSON with:
 - reply: for questions, a short, friendly answer using the household state; \
 for change requests, one sentence saying what you will do."""
 
-ACT_SYSTEM = """You are the action step of PawPal+. Carry out the planned steps by calling \
+ACT_SYSTEM = """You are the action step of PawPal 2.0. Carry out the planned steps by calling \
 the tools, one change at a time. Refer to tasks by id (T1, T2, ...) and to people and pets \
 by name. Only change home hours or availability when the owner asked for it. \
 When every change is made, call create_daily_plan, then reply with one sentence \
 saying what you changed."""
 
-FIX_SYSTEM = """You are the fix step of PawPal+. The schedule has the problems listed below. \
+FIX_SYSTEM = """You are the fix step of PawPal 2.0. The schedule has the problems listed below. \
 Resolve as many as you can using edit_task (move a task's time, shorten it, or change its \
-priority) and assign_task (give it to another member who is home then). Prefer moving \
-flexible changes over reassigning; don't change the owner's request. \
+priority) and assign_task (give it to another member who is home then). If someone is \
+away, give their task to a member who isn't. Prefer moving flexible changes over \
+reassigning; don't change the owner's request. \
 When you are done, reply with one sentence saying what you changed."""
 
 PLAN_SCHEMA = {
@@ -535,8 +539,9 @@ class PawPalAgent:
         self.explain(result, toolbox)
 
     def check(self, result: RunResult, toolbox: ToolBox) -> list[str]:
-        """Read conflicts (T5) and skipped tasks; split skipped into fixable / unfixable."""
-        result.conflicts = toolbox.scheduler.detect_conflicts()
+        """Read conflicts (T5), away clashes and skipped tasks; split into fixable / unfixable."""
+        result.conflicts = (toolbox.scheduler.detect_conflicts()
+                            + toolbox.scheduler.away_warnings(result.day))
         fixable_skips, unfixable = [], []
         for task, why in toolbox.scheduler.skipped:
             target = unfixable if any(r in why for r in UNFIXABLE_REASONS) else fixable_skips

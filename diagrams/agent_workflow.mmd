@@ -1,5 +1,5 @@
 flowchart TD
-    %% PawPal+ architecture, part 2 of 2: AI agent workflow (agent.py), after login
+    %% PawPal 2.0 architecture, part 2 of 2: AI agent workflow (agent.py), after login
     %% Data flow: request -> copy to draft -> plan -> act (tools) -> check -> fix loop -> approve -> commit
     %% Part 1 (login & account creation) is in diagrams/account_creation.mmd
     %% Numbered edge labels (1, 2, 3) show the order a step does things in
@@ -17,7 +17,7 @@ flowchart TD
     end
 
     subgraph UI["Streamlit UI (app.py)"]
-        Chat["Ask PawPal+<br/>natural-language request"]
+        Chat["Ask PawPal 2.0<br/>natural-language request"]
         Display["Plan display<br/>schedule + explain_plan() + agent trace<br/>+ warnings: unresolved / unfixable"]
         Changed{"Draft differs from<br/>saved household?"}
         Confirm{"Owner approves<br/>plan?"}
@@ -33,7 +33,7 @@ flowchart TD
         Route{"Request changes<br/>the household?"}
         Answer["Answer only · answer()<br/>no edits, just explain"]
         Executor["2 · ACT · execute()<br/>LLM issues tool calls one at a time,<br/>always ending with create_daily_plan"]
-        Checker["3 · CHECK · check()<br/>read conflicts + skipped tasks<br/>split skipped into fixable / unfixable<br/>(e.g. nobody home = unfixable)"]
+        Checker["3 · CHECK · check()<br/>read conflicts + away clashes + skipped tasks<br/>split skipped into fixable / unfixable<br/>(e.g. nobody home = unfixable)"]
         Guard{"Fixable conflicts or<br/>fixable skipped tasks left?"}
         Rounds{"round under MAX_ROUNDS (3)<br/>AND count dropped last round?<br/>(always true on round 0)"}
         Fixer["4 · FIX · fix()<br/>LLM moves / reassigns / reprioritizes<br/>conflicting tasks"]
@@ -45,11 +45,11 @@ flowchart TD
         T2["edit_task / assign_task"]
         T3["update_home_hours /<br/>update_availability"]
         T4["create_daily_plan<br/>(also runs detect_conflicts)"]
-        T5["detect_conflicts"]
+        T5["detect_conflicts /<br/>away_warnings"]
         T6["explain_plan"]
     end
 
-    subgraph Core["PawPal+ core logic (pawpal_system.py)"]
+    subgraph Core["PawPal 2.0 core logic (pawpal_system.py)"]
         HH["Household (saved, source of truth)<br/>owners · pets · tasks"]
         Draft["Draft household<br/>working copy for one agent run"]
         SCH["Scheduler (on the draft)<br/>sorting · assignment · timed plan<br/>daily_plan · skipped · warnings"]
@@ -93,7 +93,7 @@ flowchart TD
 
     %% Check + fix loop
     Checker --> T5
-    T5 -. "conflicts + skipped tasks" .-> Checker
+    T5 -. "conflicts + away clashes + skipped tasks" .-> Checker
     Checker --> Guard
     Guard -- "no (unfixable items become warnings)" --> T6
     Guard -- "yes" --> Rounds

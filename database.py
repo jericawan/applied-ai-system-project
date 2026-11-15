@@ -1,4 +1,4 @@
-"""SQLite data store for PawPal+ accounts and households.
+"""SQLite data store for PawPal 2.0 accounts and households.
 
 Matches the "Data store (SQLite)" box in diagrams/account_creation.mmd:
     accounts    email · hashed password · owner id · failed login count
@@ -17,7 +17,7 @@ import sqlite3
 from datetime import date, time
 from typing import Any, Optional
 
-from pawpal_system import Household, Owner, Pet, Task
+from pawpal_system import Away, Household, Owner, Pet, Task
 
 DEFAULT_DB_PATH = os.environ.get("PAWPAL_DB", "pawpal.db")
 
@@ -92,6 +92,16 @@ def household_to_dict(household: Household) -> dict[str, Any]:
                 "home_start": _time_str(owner.home_start),
                 "home_end": _time_str(owner.home_end),
                 "available_minutes": owner.available_minutes,
+                "away": [
+                    {
+                        "label": a.label,
+                        "start_date": _date_str(a.start_date),
+                        "end_date": _date_str(a.end_date),
+                        "start_time": _time_str(a.start_time),
+                        "end_time": _time_str(a.end_time),
+                    }
+                    for a in owner.away
+                ],
             }
             for owner in household.members
         ],
@@ -136,6 +146,11 @@ def household_from_dict(data: dict[str, Any]) -> Household:
                 home_end=_parse_time(m["home_end"]),
                 available_minutes=m["available_minutes"],
                 owner_id=m["owner_id"],
+                away=[  # .get: households saved before away dates existed have none
+                    Away(a["label"], _parse_date(a["start_date"]), _parse_date(a["end_date"]),
+                         _parse_time(a["start_time"]), _parse_time(a["end_time"]))
+                    for a in m.get("away", [])
+                ],
             )
         )
     for p in data["pets"]:

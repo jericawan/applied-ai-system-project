@@ -3,5 +3,5 @@ __pycache__/
 .venv_new/
 .pytest_cache/
 .DS_Store
-# Local PawPal+ database
+# Local PawPal 2.0 database
 pawpal.db

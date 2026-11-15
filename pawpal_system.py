@@ -1,4 +1,4 @@
-"""PawPal+ system classes (based on diagrams/uml_draft.mmd)."""
+"""PawPal 2.0 system classes (based on diagrams/uml_draft.mmd)."""
 
 from __future__ import annotations
 
@@ -138,6 +138,59 @@ class Pet:
 
 
 @dataclass(eq=False)
+class Away:
+    """A stretch of time someone can't do pet care: an event, trip, or vacation.
+
+    start_time/end_time set the hours they're away on each of those days;
+    leave both as None for whole days (e.g. a vacation).
+    """
+
+    label: str
+    start_date: date
+    end_date: date
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+
+    def __post_init__(self) -> None:
+        """Check the dates and times make sense."""
+        if self.end_date < self.start_date:
+            raise ValueError("Away end date can't be before the start date.")
+        if (self.start_time is None) != (self.end_time is None):
+            raise ValueError("Give both a start and end time, or neither for whole days.")
+        if self.start_time is not None and self.start_time >= self.end_time:
+            raise ValueError("Away start time must be before the end time.")
+
+    @property
+    def all_day(self) -> bool:
+        """True if this covers whole days."""
+        return self.start_time is None
+
+    def covers(self, day: date, start: Optional[time] = None, duration_minutes: int = 0) -> bool:
+        """Return True if this makes the person unavailable for a task on `day`.
+
+        A task with a set time is blocked if it overlaps the away hours. A task
+        with no set time is only blocked by a whole-day absence, since it can be
+        done at another time that day.
+        """
+        if not self.start_date <= day <= self.end_date:
+            return False
+        if self.all_day:
+            return True
+        if start is None:
+            return False
+        begin = _to_minutes(start)
+        end = begin + max(duration_minutes, 1)
+        return begin < _to_minutes(self.end_time) and end > _to_minutes(self.start_time)
+
+    def describe(self) -> str:
+        """Short text like "Beach trip, Nov 20-Nov 24" or "Dentist, Nov 18 14:00-15:00"."""
+        days = (f"{self.start_date:%b %d}" if self.start_date == self.end_date
+                else f"{self.start_date:%b %d}-{self.end_date:%b %d}")
+        hours = "" if self.all_day else f" {self.start_time:%H:%M}-{self.end_time:%H:%M}"
+        return f"{self.label}, {days}{hours}"
+
+
+@dataclass(eq=False)
 class Owner:
     """One person in the household and their availability.
 
@@ -153,6 +206,23 @@ class Owner:
     tasks: list[Task] = field(default_factory=list, repr=False)
     # Links this person to their saved account (see auth.py); None if not saved.
     owner_id: Optional[str] = None
+    # Events and vacations when this person can't do pet care.
+    away: list[Away] = field(default_factory=list, repr=False)
+
+    def add_away(self, away: Away) -> None:
+        """Record an event or vacation when this person is unavailable."""
+        self.away.append(away)
+
+    def remove_away(self, away: Away) -> None:
+        """Delete an event or vacation."""
+        if away in self.away:
+            self.away.remove(away)
+
+    def away_during(
+        self, day: date, start: Optional[time] = None, duration_minutes: int = 0
+    ) -> Optional[Away]:
+        """Return the absence that blocks a task on `day` (at `start`), or None if available."""
+        return next((a for a in self.away if a.covers(day, start, duration_minutes)), None)
 
     def __post_init__(self) -> None:
         """Check that home hours, if both are set, start before they end."""
@@ -441,7 +511,9 @@ class Scheduler:
             candidates = [
                 owner
                 for owner in self.household.members
-                if task.due_time is None or owner.can_fit(task.due_time, task.duration_minutes)
+                if (task.due_time is None or owner.can_fit(task.due_time, task.duration_minutes))
+                and owner.away_during(day or date.today(), task.due_time,
+                                      task.duration_minutes) is None
             ]
             if not candidates:
                 continue  # stays unassigned; create_daily_plan reports it
@@ -645,6 +717,40 @@ class Scheduler:
             if shares_pet or same_person:
                 clashes.append(other)
         return clashes
+
+    def away_warnings(self, day: Optional[date] = None) -> list[str]:
+        """Warn about tasks due on `day` that nobody available can do.
+
+        How it works:
+            1. Look at each task still to do that day.
+            2. Assigned task: warn if that person is away then.
+            3. "Anyone" (unassigned) task: warn only if every member is away then.
+
+        This only reports; it never changes or removes tasks.
+
+        Returns:
+            One message per blocked task, e.g. "Jo is away (Beach trip, ...) ...".
+        """
+        day = day or date.today()
+        warnings = [self.away_warning(task, day) for task in self.household.tasks
+                    if task.is_pending_on(day)]
+        return [warning for warning in warnings if warning]
+
+    def away_warning(self, task: Task, day: Optional[date] = None) -> Optional[str]:
+        """Return a warning if nobody who could do `task` is available on `day`, else None."""
+        day = day or date.today()
+        when = f" at {task.due_time:%I:%M %p}" if task.due_time else ""
+        if task.assigned_to is not None:
+            away = task.assigned_to.away_during(day, task.due_time, task.duration_minutes)
+            if away is None:
+                return None
+            return (f"{task.assigned_to.name} is away ({away.describe()}) and can't do "
+                    f"'{task.name}' on {day:%a %b %d}{when}.")
+        members = self.household.members
+        if members and all(m.away_during(day, task.due_time, task.duration_minutes)
+                           for m in members):
+            return f"Everyone is away, so nobody can do '{task.name}' on {day:%a %b %d}{when}."
+        return None
 
     def create_checklist(self, day: Optional[date] = None) -> list[tuple[str, bool]]:
         """Return (task name, done on that day?) for each task in the daily plan."""

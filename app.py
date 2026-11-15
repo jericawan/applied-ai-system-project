@@ -1,19 +1,19 @@
-"""PawPal+ Streamlit app: login / sign-up, AI agent chat, and manual task tools.
+"""PawPal 2.0 Streamlit app: login / sign-up, AI agent chat, and manual task tools.
 
 Flow (diagrams/account_creation.mmd, then diagrams/agent_workflow.mmd):
     login / sign-up -> session -> chat request -> agent draft -> approve -> commit
 """
 
-from datetime import date, time
+from datetime import date, time, timedelta
 
 import streamlit as st
 
 import agent
 import auth
 import database
-from pawpal_system import Pet, Scheduler, Task
+from pawpal_system import Away, Pet, Scheduler, Task
 
-st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
+st.set_page_config(page_title="PawPal 2.0", page_icon="🐾", layout="centered")
 
 PRIORITY_TO_INT = {"high": 1, "medium": 2, "low": 3}
 REPEAT_OPTIONS = {"does not repeat": None, "daily": "daily", "weekly": "weekly"}
@@ -50,6 +50,11 @@ def plan_table(plan):
     ]
 
 
+def flash(kind, message):
+    """Queue a message (success / info / warning / error) to show after the next rerun."""
+    st.session_state.setdefault("flash", []).append((kind, message))
+
+
 def save_session_or_reload(session):
     """Save manual edits; if another member saved first, reload their version instead."""
     try:
@@ -57,9 +62,11 @@ def save_session_or_reload(session):
         return True
     except database.VersionConflict:
         st.session_state.session = auth.reload_session(conn, session)
-        st.session_state.flash = ("warning", "Another member saved changes first, so yours weren't "
-                                             "saved. The latest household is loaded; please try again.")
+        flash("warning", "Another member saved changes first, so yours weren't "
+                         "saved. The latest household is loaded; please try again.")
         return False
+
+
 
 
 # --- Login & account creation ----------------------------------------------------
@@ -172,14 +179,14 @@ def show_signup():
 
     owner_id, code = auth.save_account(conn, form)
     st.session_state.session = auth.start_session(conn, owner_id)
-    st.session_state.flash = ("success", f"Account created! Your household code is {code}.")
+    flash("success", f"Account created! Your household code is {code}.")
     st.rerun()
 
 
 # --- AI agent chat ---------------------------------------------------------------
 
 def show_agent(session, plan_day):
-    st.subheader("Ask PawPal+")
+    st.subheader("Ask PawPal 2.0")
     st.caption("Ask a question about your plan, or ask for changes "
                "(e.g. \"Move Mochi's brushing to the evening\"). You approve changes before they're saved.")
 
@@ -235,9 +242,9 @@ def show_agent(session, plan_day):
     if col1.button("Approve and save", type="primary"):
         try:
             agent.commit(conn, session.household_code, result)
-            st.session_state.flash = ("success", "Saved!")
+            flash("success", "Saved!")
         except database.VersionConflict:
-            st.session_state.flash = ("warning", "Another member saved changes first, so this plan "
+            flash("warning", "Another member saved changes first, so this plan "
                                                  "wasn't saved. Please send your request again.")
         st.session_state.session = auth.reload_session(conn, session)
         del st.session_state.agent_result
@@ -247,7 +254,7 @@ def show_agent(session, plan_day):
             st.session_state.feedback = feedback.strip()
         st.session_state.session = auth.reload_session(conn, session)
         del st.session_state.agent_result
-        st.session_state.flash = ("info", "Discarded. Any feedback will be added to your next request.")
+        flash("info", "Discarded. Any feedback will be added to your next request.")
         st.rerun()
 
 
@@ -266,15 +273,19 @@ def show_todo_checklist(session, plan_day):
 
     done_count = sum(t.is_done_on(plan_day) for t in todays)
     st.progress(done_count / len(todays), text=f"{done_count} of {len(todays)} done")
+    for warning in Scheduler(household).away_warnings(plan_day):
+        st.warning(f"🧳 {warning}")
 
     for task in Scheduler(household).sort_by_time(todays):
         when = task.due_time.strftime("%I:%M %p") if task.due_time else "Any time"
         pets = ", ".join(p.name for p in task.pets) or "no pet"
-        who = f" · {task.assigned_to.name}" if task.assigned_to else ""
-        label = f"**{task.name}** ({pets}) · {when} · {task.duration_minutes} min{who}"
+        who = task.assigned_to.name if task.assigned_to else "Anyone"
+        label = f"**{task.name}** ({pets}) · {when} · {task.duration_minutes} min · {who}"
         done = task.is_done_on(plan_day)
         if done and task.completed_by is not None:
             label += f" · done by {task.completed_by.name}"
+        elif not done and Scheduler(household).away_warning(task, plan_day):
+            label += " · 🧳 away"
 
         # Key by position in household.tasks (Household only accepts its own Task objects).
         # Done tasks are locked: checking off can't be undone once the next copy exists.
@@ -287,65 +298,170 @@ def show_todo_checklist(session, plan_day):
                 message = f"Done! '{task.name}' is checked off."
                 if next_task is not None:
                     message += f" Next one added for {next_task.due_date:%A, %b %d}."
-                st.session_state.flash = ("success", message)
+                flash("success", message)
             else:
                 st.session_state.pop(key, None)  # not saved: untick so it isn't retried
             st.rerun()
 
 
+# --- Events & vacations ------------------------------------------------------------
+
+def show_away(session):
+    """List upcoming absences and add new ones; tasks during them get warnings."""
+    household, owner = session.household, session.owner
+    st.subheader("Events & Vacations")
+    st.caption("Add times someone can't do pet care. Their tasks during those times get a "
+               "🧳 warning, and \"Anyone\" tasks won't be given to them.")
+
+    upcoming = sorted(
+        ((m, a) for m in household.members for a in m.away if a.end_date >= date.today()),
+        key=lambda pair: (pair[1].start_date, pair[1].start_time or time(0)),
+    )
+    if not upcoming:
+        st.info("No upcoming events or vacations.")
+    for i, (member, away) in enumerate(upcoming):
+        col1, col2 = st.columns([5, 1])
+        col1.markdown(f"🧳 **{member.name}** · {away.describe()}")
+        if col2.button("Remove", key=f"away_remove_{i}"):
+            member.remove_away(away)
+            if save_session_or_reload(session):
+                flash("success", f"Removed {away.label} for {member.name}.")
+            st.rerun()
+
+    with st.expander("Add an event or vacation"):
+        with st.form("add_away", clear_on_submit=True):
+            names = [owner.name] + [m.name for m in household.members if m is not owner]
+            who = st.selectbox("Who is away", names)
+            label = st.text_input("What is it?", placeholder="e.g. Beach vacation, Work trip, Dentist")
+            col1, col2 = st.columns(2)
+            start_day = col1.date_input("From", value=date.today())
+            end_day = col2.date_input("To", value=date.today())
+            all_day = st.checkbox("All day", value=True)
+            col1, col2 = st.columns(2)
+            start_at = col1.time_input("Starts at (if not all day)", value=time(9, 0))
+            end_at = col2.time_input("Ends at (if not all day)", value=time(17, 0))
+            submitted = st.form_submit_button("Add")
+        if not submitted:
+            return
+        if not label.strip():
+            st.error("Give the event a name.")
+            return
+        member = next(m for m in household.members if m.name == who)
+        try:
+            away = Away(label.strip(), start_day, end_day,
+                        None if all_day else start_at, None if all_day else end_at)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+        member.add_away(away)
+        if save_session_or_reload(session):
+            flash("success", f"Added {away.describe()} for {member.name}.")
+            # Warn about tasks that now can't be done (checks up to the first 31 days)
+            scheduler = Scheduler(household)
+            blocked = []
+            day = start_day
+            while day <= min(end_day, start_day + timedelta(days=30)):
+                for task in household.tasks:
+                    if (task.is_pending_on(day) and task.assigned_to in (member, None)
+                            and scheduler.away_warning(task, day)):
+                        blocked.append(f"{task.name} ({day:%a %b %d})")
+                day += timedelta(days=1)
+            if blocked:
+                shown = ", ".join(blocked[:5]) + (f", and {len(blocked) - 5} more"
+                                                   if len(blocked) > 5 else "")
+                flash("warning", f"🧳 {member.name} will be unavailable for {len(blocked)} "
+                                 f"task(s): {shown}. Reassign them or ask PawPal 2.0 to.")
+        st.rerun()
+
+
 # --- Manual task tools (saved to the database) -----------------------------------
+
+def add_task(session, pet_choice, new_pet_name, species, title, duration, priority,
+             assigned_to, due_time, frequency, first_due, plan_day):
+    """Add the task, save, queue any clash / away warnings, and clear the form."""
+    household = session.household
+    if new_pet_name is not None:
+        pet = next((p for p in household.pets if p.name == new_pet_name.strip()), None)
+        if pet is None:
+            pet = Pet(name=new_pet_name.strip(), breed=species)
+            household.add_pet(pet)
+    else:
+        pet = next(p for p in household.pets if p.name == pet_choice)
+    task = Task(name=title, duration_minutes=duration, priority=PRIORITY_TO_INT[priority],
+                pets=[pet], frequency=frequency, due_date=first_due)
+    household.add_task(task, due_time=due_time, assigned_to=assigned_to)
+
+    scheduler = Scheduler(household)
+    clashes = scheduler.find_clashes(task)
+    away_warning = scheduler.away_warning(task, task.due_date or plan_day)
+    if save_session_or_reload(session):
+        who = assigned_to.name if assigned_to else ANYONE.lower()
+        flash("success", f"Added '{title}' for {pet.name} ({who}).")
+        for other in clashes:
+            same_task = other.name.strip().lower() == task.name.strip().lower()
+            kind = "Possible duplicate" if same_task else "Time clash"
+            message = (f"{kind}: '{task.name}' at {task.due_time:%I:%M %p} overlaps "
+                       f"'{other.name}' ({', '.join(p.name for p in other.pets)}) "
+                       f"at {other.due_time:%I:%M %p}.")
+            flash("warning", f"⚠️ {message}")
+            st.toast(message, icon="⚠️")
+        if away_warning:
+            flash("warning", f"🧳 {away_warning}")
+        st.session_state.reset_add_task = True  # clear the fill-ins on the next run
+    st.rerun()
+
+
+# Widget keys for the Add Task form, cleared after each task is added
+ADD_TASK_KEYS = ["add_pet", "add_new_pet_name", "add_species", "add_title", "add_duration",
+                 "add_priority", "add_assignee", "add_has_time", "add_due_time", "add_repeat",
+                 "add_first_due"]
+ANYONE = "Anyone"
+
 
 def show_manual_tools(session, plan_day):
     household, owner = session.household, session.owner
 
     st.subheader("Add a Task")
+    if st.session_state.pop("reset_add_task", False):
+        for key in ADD_TASK_KEYS:  # back to blank / default fill-ins
+            st.session_state.pop(key, None)
+
     pet_names = [p.name for p in household.pets]
-    pet_choice = st.selectbox("Pet", pet_names + ["➕ New pet"])
+    pet_choice = st.selectbox("Pet", pet_names + ["➕ New pet"], key="add_pet")
     if pet_choice == "➕ New pet":
         col1, col2 = st.columns(2)
-        new_pet_name = col1.text_input("Pet name", value="Mochi")
-        species = col2.selectbox("Species", ["dog", "cat", "other"])
+        new_pet_name = col1.text_input("Pet name", placeholder="e.g. Mochi", key="add_new_pet_name")
+        species = col2.selectbox("Species", ["dog", "cat", "other"], key="add_species")
 
     col1, col2, col3 = st.columns(3)
-    task_title = col1.text_input("Task title", value="Morning walk")
-    duration = col2.number_input("Duration (minutes)", min_value=1, max_value=240, value=20)
-    priority = col3.selectbox("Priority", ["low", "medium", "high"], index=2)
+    task_title = col1.text_input("Task title", placeholder="e.g. Morning walk", key="add_title")
+    duration = col2.number_input("Duration (minutes)", min_value=1, max_value=240, value=20,
+                                 key="add_duration")
+    priority = col3.selectbox("Priority", ["low", "medium", "high"], index=2, key="add_priority")
 
     members = {m.name: m for m in household.members}
-    assignee = st.selectbox("Who does it", [owner.name] + [n for n in members if n != owner.name]
-                            + ["Auto-assign"])
-    has_due_time = st.checkbox("Must be done at a set time")
-    due_time = st.time_input("Due time", value=time(17, 0)) if has_due_time else None
-    frequency = REPEAT_OPTIONS[st.selectbox("Repeats", list(REPEAT_OPTIONS))]
-    first_due = st.date_input("First due date", value=date.today()) if frequency else None
+    assignee = st.selectbox(
+        "Assign to", [owner.name] + [n for n in members if n != owner.name] + [ANYONE],
+        key="add_assignee",
+        help="\"Anyone\" leaves it open; the schedule gives it to whoever is home and free.",
+    )
+    has_due_time = st.checkbox("Must be done at a set time", key="add_has_time")
+    due_time = (st.time_input("Due time", value=time(17, 0), key="add_due_time")
+                if has_due_time else None)
+    frequency = REPEAT_OPTIONS[st.selectbox("Repeats", list(REPEAT_OPTIONS), key="add_repeat")]
+    first_due = (st.date_input("First due date", value=date.today(), key="add_first_due")
+                 if frequency else None)
 
     if st.button("Add task"):
-        if pet_choice == "➕ New pet":
-            pet = next((p for p in household.pets if p.name == new_pet_name), None)
-            if pet is None:
-                pet = Pet(name=new_pet_name, breed=species)
-                household.add_pet(pet)
+        if not task_title.strip():
+            st.error("Give the task a title.")
+        elif pet_choice == "➕ New pet" and not new_pet_name.strip():
+            st.error("Give the new pet a name.")
         else:
-            pet = next(p for p in household.pets if p.name == pet_choice)
-        task = Task(name=task_title, duration_minutes=int(duration),
-                    priority=PRIORITY_TO_INT[priority], pets=[pet],
-                    frequency=frequency, due_date=first_due)
-        household.add_task(task, due_time=due_time, assigned_to=members.get(assignee))
-
-        # Warn right away if the new task overlaps another timed task
-        clashes = Scheduler(household).find_clashes(task)
-        if save_session_or_reload(session):
-            st.success(f"Added '{task_title}' for {pet.name}.")
-            for other in clashes:
-                same_task = other.name.strip().lower() == task.name.strip().lower()
-                kind = "Possible duplicate" if same_task else "Time clash"
-                message = (f"{kind}: '{task.name}' at {task.due_time:%I:%M %p} overlaps "
-                           f"'{other.name}' ({', '.join(p.name for p in other.pets)}) "
-                           f"at {other.due_time:%I:%M %p}.")
-                st.warning(f"⚠️ {message}")
-                st.toast(message, icon="⚠️")
-        else:
-            st.rerun()
+            add_task(session, pet_choice, new_pet_name if pet_choice == "➕ New pet" else None,
+                     species if pet_choice == "➕ New pet" else None, task_title.strip(),
+                     int(duration), priority, members.get(assignee), due_time, frequency,
+                     first_due, plan_day)
 
     if household.tasks:
         st.write("Current tasks:")
@@ -356,7 +472,7 @@ def show_manual_tools(session, plan_day):
                 "Duration (minutes)": t.duration_minutes,
                 "Priority": priority_label(t.priority),
                 "Due time": t.due_time.strftime("%I:%M %p") if t.due_time else "Any time",
-                "Assigned to": t.assigned_to.name if t.assigned_to else "Not assigned",
+                "Assigned to": t.assigned_to.name if t.assigned_to else ANYONE,
                 "Repeats": (t.frequency or "no").capitalize(),
                 "Due date": t.due_date.strftime("%b %d") if t.due_date else "Every day",
                 "Done": "Yes" if t.last_completed else "",
@@ -364,7 +480,7 @@ def show_manual_tools(session, plan_day):
             for t in Scheduler(household).sort_by_time()
         ])
     else:
-        st.info("No tasks yet. Add one above, or ask PawPal+.")
+        st.info("No tasks yet. Add one above, or ask PawPal 2.0.")
 
     st.divider()
     show_todo_checklist(session, plan_day)
@@ -383,13 +499,15 @@ def show_manual_tools(session, plan_day):
             st.warning(f"Skipped {task.name}: {reason}")
         for warning in scheduler.warnings:
             st.warning(f"⚠️ {warning}")
+        for warning in scheduler.away_warnings(plan_day):
+            st.warning(f"🧳 {warning}")
         # Planning assigns unassigned tasks; reload so that isn't kept unsaved
         st.session_state.session = auth.reload_session(conn, session)
 
 
 # --- Page ------------------------------------------------------------------------
 
-st.title("🐾 PawPal+")
+st.title("🐾 PawPal 2.0")
 
 if "session" not in st.session_state:
     st.caption("Plan your household's pet care together.")
@@ -412,10 +530,11 @@ with st.sidebar:
         st.session_state.clear()
         st.rerun()
 
-if "flash" in st.session_state:
-    kind, message = st.session_state.pop("flash")
+for kind, message in st.session_state.pop("flash", []):
     getattr(st, kind)(message)
 
 show_agent(session, plan_day)
+st.divider()
+show_away(session)
 st.divider()
 show_manual_tools(session, plan_day)

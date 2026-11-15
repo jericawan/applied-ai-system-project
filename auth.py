@@ -1,4 +1,4 @@
-"""Login and account creation for PawPal+.
+"""Login and account creation for PawPal 2.0.
 
 Follows the "Login & account creation" box in diagrams/account_creation.mmd:
     login()                   Log in -> Credentials valid? (lock after 5 failures)

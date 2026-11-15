@@ -1,4 +1,4 @@
-"""Tests for the most important PawPal+ scheduling behaviors."""
+"""Tests for the most important PawPal 2.0 scheduling behaviors."""
 
 from datetime import date, time
 
