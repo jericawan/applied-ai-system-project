@@ -72,3 +72,8 @@ What surprised me about AI is that it can't always be trusted as it may interpre
 - Ask for home hours during sign-up, and warn when a member has none set.
 - Replace greedy scheduling with a smarter approach that balances tasks fairly between members.
 - make the web design to display weekly tasks versus personal tasks. 
+
+### Portfolio Reflection: What This Project Says About Me as an AI Engineer
+
+
+PawPal 2.0 is an AI system designed with both pets and families in mind. I learned that an AI agent creating a schedule has to consider the needs of everyone involved: the pets who need care and the family members who share it. I also believe the user should stay in control, which is why every change PawPal 2.0 suggests must be approved by the user before it is saved. This keeps everyone fully in the loop. The features in this project are built around real family life and busy schedules, whether someone is leaving for vacation or their availability changes. I also want to emphasize that I used AI as a collaborator, not an autopilot. I kept going back and forth with it, questioning its suggestions and making changes until my ideas were carried out the way I wanted.
