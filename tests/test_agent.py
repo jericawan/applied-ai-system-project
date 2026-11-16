@@ -283,3 +283,102 @@ def test_commit_saves_draft_and_detects_conflicts(home):
 
     with pytest.raises(database.VersionConflict):  # same draft, now out of date
         agent.commit(conn, "HOME01", result)
+
+
+# --- New pets, biweekly tasks, retries ----------------------------------------
+
+def test_agent_adds_new_pet_then_its_tasks(home):
+    client = FakeClient(
+        plan_response(True, ["Add Tuna", "Add a daily walk", "Add a biweekly shower"]),
+        tool_response(("add_pet", {"name": "Tuna", "breed": "Shih Tzu", "age": 2,
+                                   "special_needs": ["daily walk"]})),
+        tool_response(("add_task", {"name": "Walk Tuna", "duration_minutes": 20, "priority": 1,
+                                    "pet_names": ["Tuna"], "frequency": "daily"}),
+                      ("add_task", {"name": "Shower Tuna", "duration_minutes": 30, "priority": 2,
+                                    "pet_names": ["Tuna"], "frequency": "biweekly"}),
+                      ("create_daily_plan", {})),
+        text_response("Added Tuna with a daily walk and a shower every other week."),
+        text_response("Nothing to fix."),  # FIX round for the existing 10:00 clash
+    )
+    result = run(client, home, "Add a pet Tuna who needs walks and a shower every other week")
+
+    tuna = next(p for p in result.draft.pets if p.name == "Tuna")
+    assert (tuna.breed, tuna.age, tuna.special_needs) == ("Shih Tzu", 2, ["daily walk"])
+    assert [(t.name, t.frequency) for t in tuna.tasks] == [("Walk Tuna", "daily"),
+                                                           ("Shower Tuna", "biweekly")]
+    assert all(t.pets for t in result.draft.tasks)
+    assert result.error is None
+
+
+def test_task_without_a_pet_is_rejected(home):
+    client = FakeClient(
+        plan_response(True, ["Add a walk"]),
+        tool_response(("add_task", {"name": "Walk", "duration_minutes": 20, "priority": 1,
+                                    "pet_names": [], "frequency": "daily"})),
+        text_response("Couldn't add it."),
+        text_response("Nothing to fix."),
+    )
+    result = run(client, home)
+    assert any("needs at least one pet" in line for line in result.log)
+    assert all(t.name != "Walk" for t in result.draft.tasks)
+
+
+def test_adding_a_pet_twice_is_rejected(home):
+    client = FakeClient(
+        plan_response(True, ["Add Mochi"]),
+        tool_response(("add_pet", {"name": "mochi", "breed": "Cat", "age": 1, "special_needs": []})),
+        text_response("Mochi is already here."),
+        text_response("Nothing to fix."),
+    )
+    result = run(client, home)
+    assert any("already a household pet" in line for line in result.log)
+    assert len(result.draft.pets) == 2
+
+
+def test_biweekly_task_repeats_two_weeks_later(home):
+    biscuit = home.pets[0]
+    task = Task("Bath", 30, 2, pets=[biscuit], frequency="biweekly", due_date=DAY)
+    home.add_task(task, assigned_to=home.members[0])
+    next_task = home.check_off_task(task, by=home.members[0], on=DAY)
+    assert next_task.due_date == date(2026, 11, 30)
+
+
+def test_real_client_retries_temporary_errors():
+    from google.genai import types
+    options = types.HttpOptions.model_validate({"retry_options": agent.RETRY_OPTIONS})
+    assert options.retry_options.attempts == 4
+    assert 503 in options.retry_options.http_status_codes
+
+
+# --- Revising a rejected plan ---------------------------------------------------
+
+def test_revision_request_includes_request_rejected_plan_and_feedback():
+    rejected = agent.RunResult("Fix the 10:00 clash", Household("Home"), 1, DAY,
+                               steps=["Move Vet call to 11:00"])
+    text = agent.revision_request("Fix the 10:00 clash", rejected, "Move grooming instead")
+    assert text.startswith("Fix the 10:00 clash")
+    assert "Move Vet call to 11:00" in text
+    assert "Owner's feedback: Move grooming instead" in text
+
+
+def test_revised_run_follows_feedback(home):
+    first = run(FakeClient(
+        plan_response(True, ["Move Vet call to 11:00"]),
+        tool_response(("edit_task", {"task_id": "T2", "due_time": "11:00"})),
+        text_response("Moved the vet call."),
+    ), home, "Fix the 10:00 clash")
+    assert first.draft.tasks[1].due_time == time(11)
+
+    revised_client = FakeClient(
+        plan_response(True, ["Move Grooming to 11:00"]),
+        tool_response(("edit_task", {"task_id": "T1", "due_time": "11:00"})),
+        text_response("Moved grooming instead."),
+    )
+    request = agent.revision_request("Fix the 10:00 clash", first, "Keep the vet call at 10")
+    second = run(revised_client, home, request)
+
+    sent = revised_client.requests[0]["contents"][0]["parts"][0]["text"]
+    assert "Keep the vet call at 10" in sent
+    assert second.draft.tasks[0].due_time == time(11)   # grooming moved
+    assert second.draft.tasks[1].due_time == time(10)   # vet call kept, per feedback
+    assert home.tasks[1].due_time == time(10)           # saved household never changed

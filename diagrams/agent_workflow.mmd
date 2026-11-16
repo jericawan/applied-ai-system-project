@@ -1,6 +1,7 @@
 flowchart TD
-    %% PawPal 2.0 architecture, part 2 of 2: AI agent workflow (agent.py), after login
+    %% PawPal 2.0 architecture, part 2 of 2: after login - AI agent workflow (agent.py) + manual tools (app.py)
     %% Data flow: request -> copy to draft -> plan -> act (tools) -> check -> fix loop -> approve -> commit
+    %% Manual tools (events/vacations, add task, to-do list, build schedule) save directly, with the same version check
     %% Part 1 (login & account creation) is in diagrams/account_creation.mmd
     %% Numbered edge labels (1, 2, 3) show the order a step does things in
     %% LEGEND: solid arrow (-->) = next step / function call
@@ -20,11 +21,19 @@ flowchart TD
         Chat["Ask PawPal 2.0<br/>natural-language request"]
         Display["Plan display<br/>schedule + explain_plan() + agent trace<br/>+ warnings: unresolved / unfixable"]
         Changed{"Draft differs from<br/>saved household?"}
-        Confirm{"Owner approves<br/>plan?"}
+        Confirm{"Owner approves plan?<br/>approve · revise with feedback · reject"}
         VersionOK{"Saved version unchanged<br/>since run started?"}
         Commit["Commit · commit()<br/>copy Draft -> Household<br/>save, version += 1"]
         Rollback["Discard draft · rollback()<br/>reload latest household"]
         ErrorMsg["Error message<br/>draft discarded"]
+
+        subgraph Manual["Manual tools (no AI)"]
+            AvailUI["Availability<br/>home hours (or all day)<br/>+ daily care-minute limit, per member<br/>warns about tasks outside new hours"]
+            AwayUI["Events & Vacations<br/>add / remove absences<br/>(all day or a time range)"]
+            AddTask["Add a Task<br/>assign to a member or Anyone<br/>repeats: once · daily · weekly · every other week<br/>form clears after each task"]
+            Todo["To-Do List<br/>checkbox = check_off_task()<br/>🧳 away warnings"]
+            Build["Build Schedule<br/>create_daily_plan()<br/>+ conflict & away warnings"]
+        end
     end
 
     subgraph Agent["AI Agent (agent.py · PawPalAgent.run)"]
@@ -41,7 +50,8 @@ flowchart TD
     end
 
     subgraph Tools["Tool layer · ToolBox (function declarations -> Python functions)"]
-        T1["add_task"]
+        T0["add_pet<br/>(rejects duplicates)"]
+        T1["add_task<br/>(needs at least 1 pet)"]
         T2["edit_task / assign_task"]
         T3["update_home_hours /<br/>update_availability"]
         T4["create_daily_plan<br/>(also runs detect_conflicts)"]
@@ -50,16 +60,16 @@ flowchart TD
     end
 
     subgraph Core["PawPal 2.0 core logic (pawpal_system.py)"]
-        HH["Household (saved, source of truth)<br/>owners · pets · tasks"]
+        HH["Household (saved, source of truth)<br/>owners + away dates · pets · tasks"]
         Draft["Draft household<br/>working copy for one agent run"]
-        SCH["Scheduler (on the draft)<br/>sorting · assignment · timed plan<br/>daily_plan · skipped · warnings"]
+        SCH["Scheduler<br/>sorting · assignment (skips people away) · timed plan<br/>daily_plan · skipped · warnings · away_warnings"]
     end
 
-    LLM[["Google Gemini API<br/>(google-genai · function calling)"]]
+    LLM[["Google Gemini API<br/>(google-genai · function calling)<br/>auto-retry 429 / 500 / 503 / 504, up to 4 tries"]]
 
     subgraph Reliability["Reliability & testing"]
         Log["Agent log (RunResult.log)<br/>steps, tool calls, errors, rounds"]
-        Tests["pytest · tests/test_agent.py<br/>fake Gemini client, no real API calls"]
+        Tests["pytest · tests/test_agent.py + tests/test_away.py<br/>fake Gemini client, no real API calls"]
     end
 
     %% Agent run: start + plan
@@ -79,8 +89,9 @@ flowchart TD
     Answer -- "2 explain" --> T6
 
     %% Act
+    Executor -- "new pet first" --> T0
     Executor --> T1 & T2 & T3 & T4
-    T1 & T2 & T3 -. "edits" .-> Draft
+    T0 & T1 & T2 & T3 -. "edits" .-> Draft
     T4 --> SCH
     T5 --> SCH
     T6 --> SCH
@@ -119,7 +130,8 @@ flowchart TD
     HH -. "compare" .-> Changed
     Changed -- "no, nothing to save" --> Rollback
     Changed -- "yes" --> Confirm
-    Confirm -- "no, give feedback" --> Rollback
+    Confirm -- "no, reject" --> Rollback
+    Confirm -- "revise with feedback: original request + rejected plan + feedback (revision_request)" --> StartRun
     Confirm -- "yes" --> VersionOK
     Households -. "current version" .-> VersionOK
     VersionOK -- "yes" --> Commit
@@ -131,8 +143,18 @@ flowchart TD
     Households -. "latest saved household" .-> Rollback
     Rollback --> Chat
 
+    %% Manual tools: edit the saved household directly, saved with the version check
+    Session --> AvailUI & AwayUI & AddTask & Todo & Build
+    AvailUI -. "home hours + care minutes" .-> HH
+    AwayUI -. "away dates" .-> HH
+    AddTask & Todo -. "new / checked-off tasks" .-> HH
+    HH -. "tasks + away dates" .-> SCH
+    SCH -. "clash + away warnings" .-> AddTask & Todo & Build
+    AvailUI & AwayUI & AddTask & Todo -. "save (version check)" .-> Households
+
     %% Logging + tests
     Planner & Executor & Checker & Fixer -.-> Log
     Tools -.-> Log
     Tests -.- Agent
     Tests -.- Tools
+    Tests -.- Core

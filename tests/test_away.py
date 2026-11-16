@@ -138,3 +138,23 @@ def test_agent_reassigns_task_from_someone_away(home):
     assert result.rounds == 1 and result.unresolved == []
     assert result.draft.tasks[0].assigned_to.name == "Sam"
     assert "away: Beach trip" in client.requests[0]["contents"][0]["parts"][0]["text"]
+
+
+# --- Availability ---------------------------------------------------------------
+
+def test_clear_home_hours_means_home_all_day(home):
+    _, jo, _, _ = home
+    jo.clear_home_hours()
+    assert (jo.home_start, jo.home_end) == (None, None)
+    assert jo.is_home_at(time(23, 30))
+
+
+def test_tasks_outside_new_home_hours_are_found(home):
+    household, jo, _, biscuit = home
+    household.add_task(Task("Walk", 30, 1, pets=[biscuit]), due_time=time(7, 30), assigned_to=jo)
+    household.add_task(Task("Meds", 5, 1, pets=[biscuit]), due_time=time(12, 0), assigned_to=jo)
+    household.add_task(Task("Brush", 10, 3, pets=[biscuit]), assigned_to=jo)  # any time
+
+    jo.update_home_hours(time(9, 0), time(17, 0))
+
+    assert [t.name for t in jo.tasks_outside_home_hours(DAY)] == ["Walk"]

@@ -22,7 +22,7 @@ flowchart TD
             CodeOK{"Household code found?<br/>find_household()"}
             HasPets{"Household already<br/>has pets?"}
             S3b["Create new household<br/>enter household name<br/>generate_household_code()<br/>(regenerate on collision)"]
-            S4["Add pets (repeat for each)<br/>name · breed · age<br/>special needs + care tasks"]
+            S4["Add pets (repeat for each)<br/>name · breed · age<br/>special needs + care tasks<br/>(repeat once · daily · weekly · every other week)"]
             S5{"All fields valid?<br/>validate_signup()<br/>email not registered · age is a number<br/>at least 1 pet in household"}
             Save["Save account (one transaction)<br/>save_account()<br/>create Owner + Pet objects"]
         end

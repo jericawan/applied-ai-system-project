@@ -12,7 +12,11 @@ DEFAULT_DAY_START = time(0, 0)
 DEFAULT_DAY_END = time(23, 59)
 
 # How far ahead the next copy of a repeating task is due.
-REPEAT_INTERVALS = {"daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
+REPEAT_INTERVALS = {
+    "daily": timedelta(days=1),
+    "weekly": timedelta(weeks=1),
+    "biweekly": timedelta(weeks=2),  # every other week
+}
 
 
 def _to_minutes(t: time) -> int:
@@ -240,6 +244,18 @@ class Owner:
         if minutes is not None and minutes < 0:
             raise ValueError("Available minutes can't be negative.")
         self.available_minutes = minutes
+
+    def clear_home_hours(self) -> None:
+        """Go back to "home all day" (no set hours)."""
+        self.home_start = None
+        self.home_end = None
+
+    def tasks_outside_home_hours(self, day: Optional[date] = None) -> list[Task]:
+        """Return this person's set-time tasks still to do that don't fit their home hours."""
+        return [
+            task for task in self.pending_tasks(day)
+            if task.due_time is not None and not self.can_fit(task.due_time, task.duration_minutes)
+        ]
 
     def update_home_hours(self, start: time, end: time) -> None:
         """Change the time window this person is home."""

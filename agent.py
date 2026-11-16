@@ -41,6 +41,10 @@ logger = logging.getLogger("pawpal.agent")
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 MAX_TOKENS = 8192
+# Retry Gemini calls that fail for temporary reasons (rate limit, overloaded, server error),
+# waiting a little longer each time, before showing the owner an error.
+RETRY_OPTIONS = {"attempts": 4, "initial_delay": 2.0, "max_delay": 20.0,
+                 "http_status_codes": [429, 500, 503, 504]}
 MAX_ROUNDS = 3         # fix rounds before giving up
 MAX_TOOL_RETRIES = 2    # failed tool calls allowed per step; the next one aborts the run
 MAX_TOOL_TURNS = 12     # LLM turns allowed per ACT or FIX step
@@ -110,6 +114,17 @@ def _tool(
     }
 
 
+TOOL_ADD_PET = _tool(
+    "add_pet",
+    "Add a new pet to the household. Do this before adding tasks for a pet that isn't listed.",
+    {
+        "name": {"type": "string", "description": "The pet's name."},
+        "breed": {"type": "string", "description": "Breed or species, e.g. 'Shih Tzu'."},
+        "age": {"type": "integer", "description": "Age in years."},
+        "special_needs": {"type": "array", "items": {"type": "string"},
+                          "description": "Care needs, e.g. 'daily walk'. Empty list if none."},
+    },
+)
 TOOL_ADD_TASK = _tool(
     "add_task",
     "Add a new care task for one or more household pets.",
@@ -117,11 +132,12 @@ TOOL_ADD_TASK = _tool(
         "name": {"type": "string", "description": "Short task name, e.g. 'Evening walk'."},
         "duration_minutes": {"type": "integer", "description": "How long it takes, at least 1."},
         "priority": {"type": "integer", "description": "1 = most important, 3 = least."},
-        "pet_names": {"type": "array", "items": {"type": "string"},
-                      "description": "Names of the pets this task is for."},
+        "pet_names": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                      "description": "Names of the pets this task is for (at least one)."},
         "due_time": _optional("string", "Fixed start time as HH:MM (24h). Leave out for any time."),
         "assigned_to": _optional("string", "Household member's name. Leave out to auto-assign."),
-        "frequency": {"type": "string", "enum": ["once", "daily", "weekly"]},
+        "frequency": {"type": "string", "enum": ["once", "daily", "weekly", "biweekly"],
+                      "description": "'biweekly' means every other week."},
     },
     optional=("due_time", "assigned_to"),
 )
@@ -170,7 +186,7 @@ TOOL_CREATE_DAILY_PLAN = _tool(
     {},
 )
 
-ACT_TOOLS = [TOOL_ADD_TASK, TOOL_EDIT_TASK, TOOL_ASSIGN_TASK, TOOL_UPDATE_HOME_HOURS,
+ACT_TOOLS = [TOOL_ADD_PET, TOOL_ADD_TASK, TOOL_EDIT_TASK, TOOL_ASSIGN_TASK, TOOL_UPDATE_HOME_HOURS,
              TOOL_UPDATE_AVAILABILITY, TOOL_CREATE_DAILY_PLAN]
 FIX_TOOLS = [TOOL_EDIT_TASK, TOOL_ASSIGN_TASK]
 
@@ -231,7 +247,19 @@ class ToolBox:
         Raises:
             ValueError: The arguments were invalid (sent back to the LLM as an error).
         """
-        if name == "add_task":
+        if name == "add_pet":
+            pet_name = args["name"].strip()
+            if not pet_name:
+                raise ValueError("The pet needs a name.")
+            if any(p.name.lower() == pet_name.lower() for p in self.household.pets):
+                raise ValueError(f"{pet_name} is already a household pet.")
+            pet = Pet(pet_name, breed=args.get("breed", "").strip(), age=_int(args.get("age")) or 0,
+                      special_needs=[n.strip() for n in args.get("special_needs", []) if n.strip()])
+            self.household.add_pet(pet)
+            result = f"Added pet {pet.name}."
+        elif name == "add_task":
+            if not args.get("pet_names"):
+                raise ValueError("A task needs at least one pet. Add the pet first with add_pet.")
             pets = [self._pet(n) for n in args["pet_names"]]
             frequency = None if args["frequency"] == "once" else args["frequency"]
             task = Task(args["name"], _int(args["duration_minutes"]), _int(args["priority"]),
@@ -311,8 +339,14 @@ def describe_household(household: Household, day: date) -> str:
 PLANNER_SYSTEM = """You are the planning step of PawPal 2.0, a pet care scheduling assistant \
 for a household that shares pets. Read the owner's request and the household state.
 
-Decide whether the request needs changes to the household (adding, editing or reassigning \
-tasks, or changing someone's availability). Questions about the current plan need no changes.
+Decide whether the request needs changes to the household. The changes you can make are: \
+add a pet; add a task (repeating once, daily, weekly, or biweekly = every other week); \
+edit a task's name, duration, priority or time; assign a task to a member; and change a \
+member's home hours or care minutes. Only plan steps from that list. Questions about the \
+current plan need no changes. If the request includes the owner's feedback on a rejected \
+plan, make a different plan that follows that feedback. \
+If the owner asks for suggestions, choose sensible tasks and \
+plan to add them.
 
 Return JSON with:
 - changes_household: true if anything must change, false for questions only.
@@ -322,7 +356,9 @@ for change requests, one sentence saying what you will do."""
 
 ACT_SYSTEM = """You are the action step of PawPal 2.0. Carry out the planned steps by calling \
 the tools, one change at a time. Refer to tasks by id (T1, T2, ...) and to people and pets \
-by name. Only change home hours or availability when the owner asked for it. \
+by name. If a task is for a pet that isn't in the household yet, call add_pet first; \
+every task must be for at least one pet. Only change home hours or availability when \
+the owner asked for it. \
 When every change is made, call create_daily_plan, then reply with one sentence \
 saying what you changed."""
 
@@ -383,7 +419,7 @@ class PawPalAgent:
                 raise RuntimeError("Install the 'google-genai' package to use the AI agent.")
             if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
                 raise RuntimeError("Set the GEMINI_API_KEY environment variable to use the AI agent.")
-            client = genai.Client()
+            client = genai.Client(http_options={"retry_options": RETRY_OPTIONS})
         self.client = client
         self.model = model
         self.max_rounds = max_rounds
@@ -573,6 +609,21 @@ class PawPalAgent:
 
 
 # --- Review + commit (used by the UI) --------------------------------------------
+
+def revision_request(original_request: str, rejected: RunResult, feedback: str) -> str:
+    """Build a new request that asks for a revised plan, following the owner's feedback.
+
+    Includes the original request, what the rejected plan did, and the feedback, so the
+    next run starts from the saved household again but knows what to change.
+    """
+    steps = "; ".join(rejected.steps) or rejected.reply or "(no steps)"
+    return (
+        f"{original_request}\n\n"
+        f"The owner rejected your previous plan, which was: {steps}\n"
+        f"Owner's feedback: {feedback}\n"
+        f"Make a new plan for the original request that follows this feedback."
+    )
+
 
 def household_differs(draft: Household, saved: Household) -> bool:
     """Draft differs from saved household?"""

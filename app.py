@@ -16,7 +16,8 @@ from pawpal_system import Away, Pet, Scheduler, Task
 st.set_page_config(page_title="PawPal 2.0", page_icon="🐾", layout="centered")
 
 PRIORITY_TO_INT = {"high": 1, "medium": 2, "low": 3}
-REPEAT_OPTIONS = {"does not repeat": None, "daily": "daily", "weekly": "weekly"}
+REPEAT_OPTIONS = {"does not repeat": None, "daily": "daily", "weekly": "weekly",
+                  "every other week": "biweekly"}
 
 
 @st.cache_resource
@@ -194,23 +195,16 @@ def show_agent(session, plan_day):
         request = st.text_area("Your request", height=80)
         sent = st.form_submit_button("Send")
     if sent and request.strip():
-        feedback = st.session_state.pop("feedback", "")
-        full_request = request.strip() + (f"\n(Feedback on the last plan: {feedback})" if feedback else "")
-        try:
-            pawpal_agent = agent.PawPalAgent()
-        except Exception as exc:  # missing package or credentials
-            st.error(f"The AI agent isn't available: {exc}")
-            return
-        with st.spinner("Planning..."):
-            st.session_state.agent_result = pawpal_agent.run(
-                full_request, session.household, session.version, plan_day)
+        if run_agent(session, request.strip(), plan_day, "Planning..."):
+            st.session_state.base_request = request.strip()  # kept for revisions
+            st.session_state.chat_shown = request.strip()
 
     result = st.session_state.get("agent_result")
     if result is None:
         return
 
     with st.chat_message("user"):
-        st.write(result.request)
+        st.write(st.session_state.get("chat_shown", result.request))
     with st.chat_message("assistant"):
         if result.error:
             st.error(f"{result.error} Nothing was changed.")
@@ -237,25 +231,60 @@ def show_agent(session, plan_day):
         st.caption("No changes were needed.")
         return
 
-    feedback = st.text_input("Feedback if you reject (optional)", key="feedback_box")
-    col1, col2 = st.columns(2)
+    feedback = st.text_input(
+        "Not quite right? Tell PawPal 2.0 what to change",
+        placeholder="e.g. Keep the walk in the morning, move feeding to 8:30 instead",
+        key="feedback_box",
+    )
+    col1, col2, col3 = st.columns(3)
     if col1.button("Approve and save", type="primary"):
         try:
             agent.commit(conn, session.household_code, result)
             flash("success", "Saved!")
         except database.VersionConflict:
             flash("warning", "Another member saved changes first, so this plan "
-                                                 "wasn't saved. Please send your request again.")
+                             "wasn't saved. Please send your request again.")
         st.session_state.session = auth.reload_session(conn, session)
-        del st.session_state.agent_result
+        clear_agent_result()
         st.rerun()
-    if col2.button("Reject"):
-        if feedback.strip():
-            st.session_state.feedback = feedback.strip()
+    if col2.button("Revise with feedback",
+                   help="Discards this plan and makes a new one that follows your feedback."):
+        if not feedback.strip():
+            st.error("Type what you'd like changed in the box above, then click Revise.")
+            return
+        # Start again from the saved household, with the original request + feedback
+        session = auth.reload_session(conn, session)
+        st.session_state.session = session
+        base = st.session_state.get("base_request", result.request)
+        request = agent.revision_request(base, result, feedback.strip())
+        if run_agent(session, request, plan_day, "Revising the plan..."):
+            st.session_state.chat_shown = f"{base}\n\n✏️ Feedback: {feedback.strip()}"
+            st.session_state.pop("feedback_box", None)
+            st.rerun()
+    if col3.button("Reject"):
         st.session_state.session = auth.reload_session(conn, session)
-        del st.session_state.agent_result
-        flash("info", "Discarded. Any feedback will be added to your next request.")
+        clear_agent_result()
+        flash("info", "Discarded. Nothing was changed.")
         st.rerun()
+
+
+def run_agent(session, request, plan_day, spinner_text):
+    """Run the agent on a request and keep the result for display. False if unavailable."""
+    try:
+        pawpal_agent = agent.PawPalAgent()
+    except Exception as exc:  # missing package or credentials
+        st.error(f"The AI agent isn't available: {exc}")
+        return False
+    with st.spinner(spinner_text):
+        st.session_state.agent_result = pawpal_agent.run(
+            request, session.household, session.version, plan_day)
+    return True
+
+
+def clear_agent_result():
+    """Forget the current plan and its request."""
+    for key in ("agent_result", "base_request", "chat_shown"):
+        st.session_state.pop(key, None)
 
 
 # --- To-do checklist ---------------------------------------------------------------
@@ -302,6 +331,69 @@ def show_todo_checklist(session, plan_day):
             else:
                 st.session_state.pop(key, None)  # not saved: untick so it isn't retried
             st.rerun()
+
+
+# --- Availability ------------------------------------------------------------------
+
+def availability_text(member):
+    """e.g. "Home 07:00 AM-09:00 PM · up to 60 min of care" or "Home all day · no limit"."""
+    hours = (f"Home {member.home_start:%I:%M %p}-{member.home_end:%I:%M %p}"
+             if member.home_start and member.home_end else "Home all day")
+    minutes = (f"up to {member.available_minutes} min of care"
+               if member.available_minutes is not None else "no care-time limit")
+    return f"{hours} · {minutes}"
+
+
+def show_availability(session, plan_day):
+    """Show everyone's normal availability and let the owner change it."""
+    household, owner = session.household, session.owner
+    st.subheader("Availability")
+    st.caption("When each person is usually home, and how much pet-care time they have per day. "
+               "The schedule only gives people tasks that fit. For one-off absences, use "
+               "Events & Vacations below.")
+    for member in household.members:
+        st.markdown(f"🕒 **{member.name}** · {availability_text(member)}")
+
+    with st.expander("Change availability"):
+        members = [owner] + [m for m in household.members if m is not owner]
+        index = st.selectbox("Whose availability", range(len(members)),
+                             format_func=lambda i: members[i].name, key="avail_member")
+        member = members[index]
+
+        # Keys include the person, so each one's current values fill the boxes
+        prefix = f"avail_{member.owner_id or index}"
+        all_day = st.checkbox("Home all day (no set hours)",
+                              value=member.home_start is None, key=f"{prefix}_all_day")
+        col1, col2 = st.columns(2)
+        start_at = col1.time_input("Home from", value=member.home_start or time(7, 0),
+                                   disabled=all_day, key=f"{prefix}_start")
+        end_at = col2.time_input("Home until", value=member.home_end or time(21, 0),
+                                 disabled=all_day, key=f"{prefix}_end")
+        limit = st.checkbox("Limit daily pet-care time",
+                            value=member.available_minutes is not None, key=f"{prefix}_limit")
+        minutes = st.number_input("Minutes per day", min_value=0, max_value=1440, step=15,
+                                  value=member.available_minutes or 60, disabled=not limit,
+                                  key=f"{prefix}_minutes")
+
+        if not st.button("Save availability", key=f"{prefix}_save"):
+            return
+        try:
+            if all_day:
+                member.clear_home_hours()
+            else:
+                member.update_home_hours(start_at, end_at)
+            member.update_availability(int(minutes) if limit else None)
+        except ValueError as exc:  # e.g. "Home start time must be before end time."
+            st.error(str(exc))
+            return
+        if save_session_or_reload(session):
+            flash("success", f"Saved {member.name}'s availability: {availability_text(member)}.")
+            outside = member.tasks_outside_home_hours(plan_day)
+            if outside:
+                names = ", ".join(f"{t.name} ({t.due_time:%I:%M %p})" for t in outside)
+                flash("warning", f"🕒 {member.name} isn't home for: {names}. These will be "
+                                 f"skipped unless you move or reassign them.")
+        st.rerun()
 
 
 # --- Events & vacations ------------------------------------------------------------
@@ -534,6 +626,8 @@ for kind, message in st.session_state.pop("flash", []):
     getattr(st, kind)(message)
 
 show_agent(session, plan_day)
+st.divider()
+show_availability(session, plan_day)
 st.divider()
 show_away(session)
 st.divider()
