@@ -8,9 +8,14 @@ My system diagram is split into two diagrams. The first diagram involves logging
 
 #### Logging In 
 
+![Account creation diagram](assets/acc-creation.png)
+
 The user has the ability to log in with their email and password, and has up to 5 tries to enter the correct password before the account gets locked. If the user does not have an account, they must create one and include their name, age, email, household, pet(s), availability, and tasks (optional). If they would like to join a household, they can fill in the household code provided by the creator of the household; if not, they can create one. Account information must be filled out before accessing the project (minus the initial tasks). Then Accounts are saved in a SQLite database.
 
 #### Workflow 
+
+![Agent workflow diagram](assets/agent-workflow.png)
+
 The user has the option to ask PawPal 2.0 a question, concern, or request, add any events and vacations that will change their saved availability, manually add a task, check out the to-do list of the day, build a schedule, and change the day. The agent will have the ability to fulfill requests made by the user. It ensures there is no overlap or potential issues with scheduling. Before any official changes are made, they are created as suggestions for users to approve. The agent will display a schedule and include an explanation behind this plan. 
 
 ### Setup Instructions 
