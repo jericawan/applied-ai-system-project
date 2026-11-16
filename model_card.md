@@ -68,4 +68,7 @@ What surprised me about AI is that it can't always be trusted as it may interpre
 ## Suggestions and Rejections 
 - **Accepted:** Something that I accepted was including the requirement that "every task needs a pet". This ensures that the logic does not break when creating a task, and each pet has a task and vice versa. This was something I personally didn't think of since I made assumptions that it was something that was already implemented. 
 - **Rejected:** Orginally my agent had the ability to reject or accept changes, with opportunity to give feedback. I found that it was important to implement a back and forward between the user and agent where the user can make changes then have the agent rework their idea. 
-
+## Future Improvements 
+- Ask for home hours during sign-up, and warn when a member has none set.
+- Replace greedy scheduling with a smarter approach that balances tasks fairly between members.
+- make the web design to display weekly tasks versus personal tasks. 

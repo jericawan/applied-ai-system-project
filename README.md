@@ -209,8 +209,11 @@ I will schedule Buddy's 30-minute bath for today at 12:30 pm and keep Luna's bat
   12:30 PM - 01:00 PM  Bathing (Buddy) -> Adams Williams  [must be done at 12:30]
   06:00 PM - 06:20 PM  Evening fetch (Buddy) -> Adams Williams  [must be done at 18:00]
 ```
-### Reliability/guardrail results 
-(.venv) (base) jericawan@MacBook-Air applied-ai-system-project % python main.py
+### Reliability/guardrail results
+
+**Command:** `python main.py` runs the system end to end without the AI: sign-up, login, building a schedule and saving. Along the way it triggers four guardrails.
+
+```
 Sign-up
 ========================================
 Created household code LI9K0K; Jo and Sam are members
@@ -236,35 +239,30 @@ Today's Schedule
 WARNING: Biscuit double-booked: 'Grooming' at 10:00 overlaps 'Vet call' at 10:00
 
 Version check: Household LI9K0K was changed by another member since version 3.
+```
 
-(Run with --agent to send a request to the AI agent.)
+**Command:** `python -m pytest` runs the automated tests, including the AI agent's guardrails. The agent tests use a fake Gemini client, so no API key is needed.
 
+```
+........................................................................ [ 50%]
+......................................................................   [100%]
+142 passed in 1.18s
+```
 
-Tasks in the order they were added
-========================================
-07:30  Morning walk
-12:00  Joint medicine
-18:00  Evening fetch
-08:15  Breakfast
-15:00  Clean litter box
-20:00  Brushing
-10:00  Grooming
-10:00  Vet call
-
-Tasks sorted by time
-========================================
-07:30  Morning walk
-08:15  Breakfast
-10:00  Grooming
-10:00  Vet call
-12:00  Joint medicine
-15:00  Clean litter box
-18:00  Evening fetch
-20:00  Brushing
-
-Completed today: ['Morning walk']
-Still to do: ['Joint medicine', 'Evening fetch', 'Breakfast', 'Clean litter box', 'Brushing', 'Grooming', 'Vet call']
-Mochi's tasks: ['Breakfast', 'Clean litter box', 'Brushing']
+| Input / situation | Guardrail behavior | Result |
+|---|---|---|
+| Sign up with an email that's already used | Rejected: "An account with this email already exists." | Pass (`main.py`) |
+| Log in with the wrong password | Rejected; the account locks for 15 minutes after 5 failed tries | Pass (`main.py`, tests) |
+| Two tasks for Biscuit at 10:00 | Warning: "Biscuit double-booked" | Pass (`main.py`) |
+| Saving after another member already saved | Version check blocks the save, so nothing is overwritten | Pass (`main.py`) |
+| Agent changes the household | Changes go to a draft; nothing is saved until the owner approves | Pass (`test_change_request_edits_draft_not_saved_household`) |
+| Agent adds a task with no pet | Tool rejects it and the error is sent back to the agent to retry | Pass (`test_task_without_a_pet_is_rejected`) |
+| Agent adds a pet that already exists | Rejected as a duplicate | Pass (`test_adding_a_pet_twice_is_rejected`) |
+| Agent keeps sending bad tool calls | Run stops after 2 retries and the draft is thrown away | Pass (`test_too_many_tool_errors_abort_the_run`) |
+| Conflict the agent can't fix | Fix loop stops after 3 rounds, or sooner if no progress, and shows warnings | Pass (`test_fix_loop_stops_at_max_rounds`) |
+| Gemini overloaded (503) or rate limited (429) | Retries automatically, then shows a clear error message | Pass (`test_real_client_retries_temporary_errors`) |
+| "add a task to feed Buddy at 12 AM" (slot already taken) | Conflict found and fixed in 1 round | Pass (Example 4) |
+| Reject a plan with feedback | Agent makes a revised plan that uses the feedback | Partial (Example 5: only part of the feedback was followed) |
 
 ### Design Decisions 
 
